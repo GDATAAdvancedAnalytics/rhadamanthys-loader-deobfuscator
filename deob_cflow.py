@@ -50,9 +50,10 @@ class MemAnalysis:
 
 class CflowUnflattener:
 
-    def __init__(self, blob: bytearray, insn_map: dict[int, CsInsn], branches: list[tuple[int, int]], imagebase: int):
+    def __init__(self, blob: bytearray, insn_map: dict[int, CsInsn], branches: list[tuple[int, int]],
+                 raw_virt_delta: int):
         self.blob = blob
-        self.imagebase = imagebase
+        self.raw_virt_delta = raw_virt_delta
         self.insn_map = insn_map
         self.branches = branches
         self.flow_reg = self._find_flow_register()
@@ -238,7 +239,8 @@ class CflowUnflattener:
         # Nop cmov stuff so save_reg has less interference.
         for insn in analysis.dispensable_insns:
             prologue.remove(insn)
-            self.blob[insn.address - self.imagebase:insn.address - self.imagebase + insn.size] = b"\x90" * insn.size
+            insn_offset = insn.address - self.raw_virt_delta
+            self.blob[insn_offset:insn_offset+insn.size] = b"\x90" * insn.size
 
         def save_reg(reg: int):
             """Modifies the prologue mov to save our needed data (residing in a register; we move it to the stack)."""
@@ -251,7 +253,7 @@ class CflowUnflattener:
             print("(top) ", insn_str)
             asm = assemble(insn_str)
             assert len(asm) == mov_in_prologue.size
-            offset = mov_in_prologue.address - self.imagebase
+            offset = mov_in_prologue.address - self.raw_virt_delta
             self.blob[offset:offset + len(asm)] = asm
             # TODO should adjust insn_map probably...
 
@@ -435,7 +437,7 @@ class CflowUnflattener:
 
     def _rewrite_simple(self, target: int, dispensable: list[CsInsn]) -> None:
         """Most common case where it goes to a single destination."""
-        rew = Rewriter(self.imagebase, self.insn_map, self.branches, dispensable)
+        rew = Rewriter(self.raw_virt_delta, self.insn_map, self.branches, dispensable)
         rew.plan_branch(b"\xE9", target, dispensable[-1])
         rew.rewrite(self.blob)
 
@@ -458,7 +460,7 @@ class CflowUnflattener:
         if self._has_interference(cmov.address, dispensable[-1].address, dispensable):
             raise Exception("Flags written between cmov and end of dispatch")
 
-        rew = Rewriter(self.imagebase, self.insn_map, self.branches, dispensable)
+        rew = Rewriter(self.raw_virt_delta, self.insn_map, self.branches, dispensable)
         # Replace cmp with jcc
         rew.plan_branch(b"\x0F" + bytes([0x80 + x86_cc]), target_true, dispensable[-1])
         # Replace original dispatcher jcc with jmp
@@ -484,7 +486,7 @@ class CflowUnflattener:
         if self._has_interference(branch.address, dispensable[-1].address, dispensable):
             raise Exception("Flags written between jcc and end of dispatch")
 
-        rew = Rewriter(self.imagebase, self.insn_map, self.branches, dispensable)
+        rew = Rewriter(self.raw_virt_delta, self.insn_map, self.branches, dispensable)
         # Place jcc
         rew.plan_branch(b"\x0F" + bytes([branch.bytes[0] + 0x10]), target_true, dispensable[-1])
         # Place jmp
@@ -512,7 +514,7 @@ class CflowUnflattener:
             assert dispensable[0].id == X86_INS_MOV
             del dispensable[0]
 
-        rew = Rewriter(self.imagebase, self.insn_map, self.branches, dispensable, allow_claim_nops=True)
+        rew = Rewriter(self.raw_virt_delta, self.insn_map, self.branches, dispensable, allow_claim_nops=True)
         # Replace cmp with branch condition
         rew.plan_instruction(analysis.branch_condition, cmp)
         # Jcc for condition
@@ -537,11 +539,12 @@ class CflowUnflattener:
 
 def deobfuscate_function(blob: bytearray, pe: pefile.PE, func: int) -> None:
     imagebase = pe.OPTIONAL_HEADER.ImageBase
+    raw_virt_delta = imagebase + pe.sections[0].VirtualAddress - pe.sections[0].PointerToRawData
 
     dis = FunctionDisassembler()
-    addr_insn_map, branches = dis.disassemble_function(blob[func-imagebase:], func)
+    addr_insn_map, branches = dis.disassemble_function(blob[func-raw_virt_delta:], func)
 
-    inliner = CflowUnflattener(blob, addr_insn_map, branches, imagebase)
+    inliner = CflowUnflattener(blob, addr_insn_map, branches, raw_virt_delta)
     inliner.deobfuscate()
 
 

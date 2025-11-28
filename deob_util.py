@@ -277,7 +277,7 @@ class Rewriter:
     make room for the new instructions.
     """
 
-    def __init__(self, imagebase: int, insn_map: dict[int, CsInsn],
+    def __init__(self, raw_virt_delta: int, insn_map: dict[int, CsInsn],
                  all_branches: list[tuple[int, int]], dispensable_insns: list[CsInsn],
                  allow_claim_nops: bool = False) -> None:
         """
@@ -287,7 +287,7 @@ class Rewriter:
                             for branches targeting the nops; they're adjusted.
         """
         self.new_instructions: list[tuple[bytes, Optional[int], CsInsn]] = []
-        self.imagebase = imagebase
+        self.raw_virt_delta = raw_virt_delta
         self.insn_map = insn_map
         self.all_branches = all_branches
         self.dispensable_insns = dispensable_insns
@@ -402,8 +402,8 @@ class Rewriter:
         if self._work_blob is None:
             self._work_blob = bytearray(blob)
 
-        data = self._work_blob[move_start - self.imagebase:move_start - self.imagebase + move_size]
-        self._work_blob[target - self.imagebase:target - self.imagebase + len(data)] = data
+        data = self._work_blob[move_start - self.raw_virt_delta:move_start - self.raw_virt_delta + move_size]
+        self._work_blob[target - self.raw_virt_delta:target - self.raw_virt_delta + len(data)] = data
 
         return True
 
@@ -444,7 +444,7 @@ class Rewriter:
                 va = extent.start
                 while va in self.insn_map and va < extent.end:
                     insn = self.insn_map[va]
-                    if not insn.group(X86_GRP_JUMP) and blob[va-self.imagebase:va-self.imagebase+insn.size] == insn.bytes:  # noqa:E501
+                    if not insn.group(X86_GRP_JUMP) and blob[va-self.raw_virt_delta:va-self.raw_virt_delta+insn.size] == insn.bytes:  # noqa:E501
                         to_write.append((insn.address, b"\x90" * insn.size))
                     va += insn.size
 
@@ -453,12 +453,12 @@ class Rewriter:
             blob[:] = self._work_blob
 
         for va, data in to_write:
-            blob[va-self.imagebase:va-self.imagebase+len(data)] = data
+            blob[va-self.raw_virt_delta:va-self.raw_virt_delta+len(data)] = data
 
     def _extend_extent(self, extent: Extent, blob: bytearray) -> bool:
         """Checks if the space below the extent happens to be nops, then claims it."""
         space = 0
-        while blob[extent.end - self.imagebase + space] == 0x90:
+        while blob[extent.end - self.raw_virt_delta + space] == 0x90:
             space += 1
 
         if space == 0:
@@ -469,7 +469,7 @@ class Rewriter:
                 src, dest = self.all_branches[i]
                 # Jumping into nops? Modify it to skip nops
                 if dest == va:
-                    jmpoff = src - self.imagebase
+                    jmpoff = src - self.raw_virt_delta
                     if blob[jmpoff] != 0xE9:
                         return False  # not supported
                     oldrel = int.from_bytes(blob[jmpoff+1:jmpoff+5], 'little', signed=True)

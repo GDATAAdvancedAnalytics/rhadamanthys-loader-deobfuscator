@@ -61,12 +61,15 @@ class JumpSite:
 
 class JumpInliner:
 
-    def __init__(self, blob: bytearray, insn_map: dict[int, CsInsn], branches: list[tuple[int, int]], imagebase: int):
+    def __init__(self, blob: bytearray, insn_map: dict[int, CsInsn], branches: list[tuple[int, int]], pe: pefile.PE):
         self.blob = blob
-        self.imagebase = imagebase
         self.insn_map = insn_map
         self.branches = branches
         self.init_consts: dict[int, int] = {}
+
+        imagebase = pe.OPTIONAL_HEADER.ImageBase
+        self.raw_virt_delta_text = imagebase + pe.sections[0].VirtualAddress - pe.sections[0].PointerToRawData
+        self.raw_virt_delta_data = imagebase + pe.sections[2].VirtualAddress - pe.sections[2].PointerToRawData
 
     def data_slice(self, va_start: int, target_regs: set[int], slices: list[list[CsInsn]],
                    in_branch: bool = False) -> None:
@@ -201,7 +204,8 @@ class JumpInliner:
         load_addr = self._get_value(load) if type(load) is CsInsn else load
         assert load_addr != 0
         # mov eax, [eax]
-        data = int.from_bytes(self.blob[load_addr-self.imagebase:load_addr-self.imagebase+4], 'little')
+        load_offset = load_addr - self.raw_virt_delta_data
+        data = int.from_bytes(self.blob[load_offset:load_offset+4], 'little')
 
         # add eax, esi
         assert site.main_slice[-2].id == X86_INS_ADD
@@ -322,12 +326,12 @@ class JumpInliner:
                 print(hex(jmp_dest_jcc))
 
         dispensable = site.fuse_slices(extras=self._get_gap_fill_instructions(site.main_slice))
-        rew = Rewriter(self.imagebase, self.insn_map, self.branches, dispensable)
+        rew = Rewriter(self.raw_virt_delta_text, self.insn_map, self.branches, dispensable)
         rew.plan_branch(b"\xE9", jmp_dest, site.main_slice[-1])
 
         if jmp_dest_jcc != -1 and jmp_dest_jcc != jmp_dest:
             assert jcc_insn is not None
-            jcc_offset = jcc_insn.address - self.imagebase
+            jcc_offset = jcc_insn.address - self.raw_virt_delta_text
             assert jcc_insn.size == 2  # else +0x10 needs changing below
             rew.plan_branch(bytes([0x0F, self.blob[jcc_offset] + 0x10]), jmp_dest_jcc, jcc_insn)
 
@@ -343,7 +347,7 @@ class JumpInliner:
             if not self._fix_interference(original_cond, flag_write):
                 raise Exception(f"Flags written between {original_cond} and jmp: {flag_write}")
 
-        rew = Rewriter(self.imagebase, self.insn_map, self.branches, dispensable)
+        rew = Rewriter(self.raw_virt_delta_text, self.insn_map, self.branches, dispensable)
         rew.plan_branch(bytes([0x0F, x86_cc + 0x80]), true_dest, final_jmp)
         rew.plan_branch(b"\xE9", false_dest, final_jmp)
         rew.rewrite(self.blob)
@@ -380,10 +384,10 @@ class JumpInliner:
         if len(written & read) != 0:
             return False
 
-        top_offset = prev.address - self.imagebase
+        top_offset = prev.address - self.raw_virt_delta_text
         top_size = prev.size + flag_dependent.size
         move_down = self.blob[top_offset:top_offset + top_size]
-        bottom_offset = flag_write.address - self.imagebase
+        bottom_offset = flag_write.address - self.raw_virt_delta_text
         bottom_size = flag_write.size
         move_up = self.blob[bottom_offset:bottom_offset + bottom_size]
 
@@ -476,11 +480,12 @@ class JumpInliner:
 
 def deobfuscate_function(blob: bytearray, pe: pefile.PE, func: int) -> None:
     imagebase = pe.OPTIONAL_HEADER.ImageBase
+    raw_virt_delta = imagebase + pe.sections[0].VirtualAddress - pe.sections[0].PointerToRawData
 
     dis = FunctionDisassembler()
-    addr_insn_map, branches = dis.disassemble_function(blob[func-imagebase:], func)
+    addr_insn_map, branches = dis.disassemble_function(blob[func-raw_virt_delta:], func)
 
-    inliner = JumpInliner(blob, addr_insn_map, branches, imagebase)
+    inliner = JumpInliner(blob, addr_insn_map, branches, pe)
     inliner.deobfuscate()
 
 

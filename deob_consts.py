@@ -71,6 +71,7 @@ def filter_outliers(addrs: list[int], max_step: int = 0x10, min_cluster_size: in
 
     filtered = [a for a, v in zip(addrs, valid) if v]
     outliers = [a for a, v in zip(addrs, valid) if not v]
+    print("Outliers:")
     for addr in outliers:
         print(hex(addr))
     return filtered
@@ -82,11 +83,12 @@ class ConstantInliner:
         self.blob = blob
         self.insn_map = insn_map
 
-        self.raw_virt_delta = pe.OPTIONAL_HEADER.ImageBase
-        self.raw_virt_delta_text = pe.OPTIONAL_HEADER.ImageBase
-        self.data_start = pe.OPTIONAL_HEADER.ImageBase + pe.sections[1].VirtualAddress
+        imagebase = pe.OPTIONAL_HEADER.ImageBase
+        self.raw_virt_delta_text = imagebase + pe.sections[0].VirtualAddress - pe.sections[0].PointerToRawData
+        self.raw_virt_delta_data = imagebase + pe.sections[2].VirtualAddress - pe.sections[2].PointerToRawData
+        self.data_start = imagebase + pe.sections[2].VirtualAddress
         # End doesn't matter too much, just bound it somewhere.
-        self.data_end = pe.OPTIONAL_HEADER.ImageBase + pe.OPTIONAL_HEADER.SizeOfImage
+        self.data_end = imagebase + pe.OPTIONAL_HEADER.SizeOfImage
 
     def is_acceptable_load(self, insn: CsInsn) -> bool:
         """Returns True if we have operands 'reg, [imm32]' where imm32 is in the PE's data range."""
@@ -187,7 +189,7 @@ class ConstantInliner:
             if address not in obfuscator_addrs:
                 continue
 
-            data = self.blob[address - self.raw_virt_delta:address - self.raw_virt_delta+4]
+            data = self.blob[address - self.raw_virt_delta_data:address - self.raw_virt_delta_data+4]
             const_val = int.from_bytes(data, 'little')
 
             if insn.id in (X86_INS_MOV, X86_INS_MOVZX):
